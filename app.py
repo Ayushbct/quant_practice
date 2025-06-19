@@ -5,9 +5,39 @@ import backtrader as bt
 import pandas as pd
 import plotly.graph_objects as go
 import numpy as np
-
+from data_loader import load_data
 # --- Strategy Definitions ---
 def get_all_strategies():
+
+    class RelativeStrengthStrategy(bt.Strategy):
+        params = dict(benchmark_symbol="SPY", rs_ma_period=10)
+
+        def __init__(self):
+            # Benchmark price will be passed as "data1"
+            self.relative_strength = self.data.close / self.datas[1].close
+            self.rs_ma = bt.indicators.SimpleMovingAverage(self.relative_strength, period=self.p.rs_ma_period)
+            self.init_trade_tracking()
+
+        def init_trade_tracking(self):
+            self.trade_log, self.buy_dates, self.buy_prices = [], [], []
+            self.sell_dates, self.sell_prices = [], []
+
+        def next(self):
+            if not self.position and self.relative_strength[0] > self.rs_ma[0] and self.relative_strength[-1] <= self.rs_ma[-1]:
+                self.buy(); self.log_trade("BUY")
+            elif self.position and self.relative_strength[0] < self.rs_ma[0] and self.relative_strength[-1] >= self.rs_ma[-1]:
+                self.sell(); self.log_trade("SELL")
+
+        def log_trade(self, action):
+            price = self.data.close[0]
+            date = self.data.datetime.date(0)
+            self.trade_log.append(f"{action} at {price:.2f} on {date}")
+            if action == "BUY":
+                self.buy_dates.append(date); self.buy_prices.append(price)
+            else:
+                self.sell_dates.append(date); self.sell_prices.append(price)
+
+
     class SmaRsiStrategy(bt.Strategy):
         params = ("rsi_low", 70), ("rsi_high", 60), ("sma_period", 20)
         def __init__(self):
@@ -153,20 +183,29 @@ def get_all_strategies():
         "MACD": MacdStrategy,
         "Bollinger Bands": BollingerBandsStrategy,
         "Momentum": MomentumStrategy,
-        "StochRSI": StochRsiStrategy
+        "StochRSI": StochRsiStrategy,
+        "Relative Strength": RelativeStrengthStrategy,
+
     }
 
 # --- Backtesting Function ---
-def run_backtest(strategy_class, data_df, **kwargs):
+def run_backtest(strategy_class, data_df, benchmark_df=None, **kwargs):
     cerebro = bt.Cerebro()
     cerebro.broker.setcash(10000)
+
     data_feed = bt.feeds.PandasData(dataname=data_df)
     cerebro.adddata(data_feed)
+
+    if benchmark_df is not None:
+        benchmark_feed = bt.feeds.PandasData(dataname=benchmark_df)
+        cerebro.adddata(benchmark_feed)
+
     cerebro.addstrategy(strategy_class, **kwargs)
     results = cerebro.run()
     strat = results[0]
     final_value = cerebro.broker.getvalue()
     return strat, final_value, (final_value - 10000) / 10000 * 100
+
 
 # --- Plotting ---
 def plot_results(data_df, strat, strategy_name, sma_period=None):
@@ -221,19 +260,46 @@ elif strategy_name == "StochRSI":
         "lower": st.sidebar.slider("Buy Threshold", 0.0, 1.0, 0.2),
         "upper": st.sidebar.slider("Sell Threshold", 0.0, 1.0, 0.8)
     }
+elif strategy_name == "Relative Strength":
+    params = {
+        "benchmark_symbol": st.sidebar.text_input("Benchmark Symbol", "SPY"),
+        "rs_ma_period": st.sidebar.slider("RS MA Period", 2, 50, 10)
+    }
 
 
-data_df = yf.download(symbol, start=start, end=end)
-if isinstance(data_df.columns, pd.MultiIndex):
-    data_df.columns = [col[0] for col in data_df.columns]
-data_df.columns = [col.lower() for col in data_df.columns]
+
+# from data_loader import load_data
+
+# Add a selector for source
+source = st.sidebar.selectbox("Data Source", ["yahoo", "nepse"])
+
+data_df = load_data(symbol, start=start, end=end, source=source)
+
+benchmark_df = None
+if strategy_name == "Relative Strength":
+    benchmark_df = load_data(params["benchmark_symbol"], start=start, end=end, source=source)
+
+
+# data_df = yf.download(symbol, start=start, end=end)
+# if isinstance(data_df.columns, pd.MultiIndex):
+#     data_df.columns = [col[0] for col in data_df.columns]
+# data_df.columns = [col.lower() for col in data_df.columns]
+
+# benchmark_df = None
+# if strategy_name == "Relative Strength":
+#     benchmark_df = yf.download(params["benchmark_symbol"], start=start, end=end)
+#     if isinstance(benchmark_df.columns, pd.MultiIndex):
+#         benchmark_df.columns = [col[0] for col in benchmark_df.columns]
+#     benchmark_df.columns = [col.lower() for col in benchmark_df.columns]
+
 
 
 if data_df.empty:
     st.error("No data found.")
 else:
     strategy_class = get_all_strategies()[strategy_name]
-    strat, final_val, total_return = run_backtest(strategy_class, data_df, **params)
+    strat, final_val, total_return = run_backtest(strategy_class, data_df, benchmark_df, **params)
+
     st.metric("Final Portfolio Value", f"${final_val:,.2f}")
     st.metric("Total Return", f"{total_return:.2f}%")
     st.plotly_chart(plot_results(data_df, strat, strategy_name, params.get("sma_period")), use_container_width=True)
